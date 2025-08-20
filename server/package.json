@@ -1,0 +1,9 @@
+{
+  "name": "career-advisor-api",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  }
+}
+

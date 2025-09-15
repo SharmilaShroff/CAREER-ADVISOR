@@ -1,7 +1,7 @@
 // App.jsx
 import React, { useMemo, useState } from "react";
 
-const API_BASE = "http://localhost:5000"; // change if your backend is deployed
+const API_BASE = "https://career-advisor-backend-o08l.onrender.com"; // change if your backend is deployed
 
 const QUESTIONS = [
   { id: "q1", text: "Which subjects did you enjoy most in 11th/12th/PUC?", type: "multi", options: ["Math", "Physics", "Chemistry", "Biology", "CS/IT", "Economics", "Business", "Arts/Design", "English/Comms", "History", "Law", "Medicine"] },

@@ -240,7 +240,7 @@ Return only valid JSON.
   }
 });
 
-// --- COMMENTS persistence (file-based) ---
+// --- INSIGHTS persistence (file-based) ---
 // GET /api/comments?role=ROLE  -> returns comments (newest first). Fuzzy matching + AI seed if none found.
 // POST /api/comments -> { name, text, role } persisted with canonicalization/tokens.
 
@@ -327,7 +327,7 @@ function ensureCommentsFileSafe() {
   }
 }
 
-// Generate AI seed comment (not persisted) for a role
+// Generate AI seed insight (not persisted) for a role
 async function generateSeedComment(role) {
   try {
     const prompt = `
@@ -449,7 +449,7 @@ app.get("/api/comments", async (req, res) => {
 
     return res.json({ comments: results });
   } catch (e) {
-    console.error("Comments GET error:", e);
+    console.error("Insights GET error:", e);
     return res.status(500).json({ error: "Failed to read comments" });
   }
 });
@@ -486,10 +486,10 @@ app.post("/api/comments", async (req, res) => {
     db.comments.unshift(entry);
 
     atomicWriteFileSync(COMMENTS_FILE, JSON.stringify(db, null, 2));
-    console.log(`[Comments POST] saved id=${entry.id} role="${entry.role}" total=${db.comments.length} file=${COMMENTS_FILE}`);
+    console.log(`[Insights POST] saved id=${entry.id} role="${entry.role}" total=${db.comments.length} file=${COMMENTS_FILE}`);
     return res.json({ ok: true, comment: entry, total: db.comments.length });
   } catch (e) {
-    console.error("Comments POST error:", e);
+    console.error("Insights POST error:", e);
     return res.status(500).json({ error: "Failed to save comment" });
   }
 });
@@ -539,7 +539,7 @@ app.get("/api/debug/comments-file", (_req, res) => {
 
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
-  console.log(`Comments file path: ${COMMENTS_FILE}`);
+  console.log(`Insights file path: ${COMMENTS_FILE}`);
 });
 
 // Export the LinkedIn URL helper so frontend devs can import it if desired.

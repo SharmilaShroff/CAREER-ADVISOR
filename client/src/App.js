@@ -4,21 +4,21 @@ import React, { useMemo, useState, useEffect } from "react";
 const API_BASE = "https://career-advisor-backend-o08l.onrender.com"; // change if your backend is deployed
 
 const QUESTIONS = [
-  { id: "q1", text: "Which subjects did you enjoy most in 11th/12th/PUC?", type: "multi", options: ["Math", "Physics", "Chemistry", "Biology", "CS/IT", "Economics", "Business", "Arts/Design", "English/Comms", "History", "Law", "Medicine"] },
+  { id: "q1", text: "Which subjects did you enjoy most in 11th/12th/PUC? (You can choose more than one)", type: "multi", options: ["Math", "Physics", "Chemistry", "Biology", "CS/IT", "Economics", "Business", "Arts/Design", "English/Comms", "History", "Law", "Medicine"] },
   { id: "q2", text: "Preferred work style?", type: "single", options: ["Individual contributor", "Small team", "Large cross-functional teams", "Customer-facing"] },
   { id: "q3", text: "Do you like coding?", type: "single", options: ["Love it", "Like it", "Neutral", "Prefer not"] },
   { id: "q4", text: "Comfort with mathematics?", type: "single", options: ["High", "Medium", "Low"] },
-  { id: "q5", text: "Interest areas", type: "multi", options: ["AI/ML", "Web/App Dev", "Data/Analytics", "Cloud/DevOps", "Cybersecurity", "UI/UX", "Product/Strategy", "Marketing/Sales", "Medicine", "Law", "Architecture", "Finance", "Arts & Media"] },
-  { id: "q6", text: "How important is salary in the first 3 years?", type: "single", options: ["Very high", "Moderate", "Less important"] },
-  { id: "q7", text: "Risk appetite (startups, experimentation)?", type: "single", options: ["High", "Medium", "Low"] },
-  { id: "q8", text: "Do you prefer research/theory or building things?", type: "single", options: ["Research/theory", "Balanced", "Hands-on building"] },
-  { id: "q9", text: "People interaction vs deep work?", type: "single", options: ["Mostly people", "Balanced", "Mostly deep work"] },
-  { id: "q10", text: "Comfort presenting ideas to an audience?", type: "single", options: ["Very", "Somewhat", "Not really"] },
-  { id: "q11", text: "Pick domains you’re curious about", type: "multi", options: ["FinTech", "HealthTech", "EdTech", "E-commerce", "Gaming", "SaaS", "Manufacturing/IoT", "Law & Justice", "Architecture"] },
-  { id: "q12", text: "Preferred learning mode", type: "single", options: ["Videos", "Docs/Books", "Projects", "Mentorship/Clubs"] },
-  { id: "q13", text: "Time you can dedicate weekly now?", type: "single", options: ["<5 hrs", "5-10 hrs", "10-20 hrs", ">20 hrs"] },
-  { id: "q14", text: "Location preference", type: "single", options: ["Bengaluru", "Hyderabad", "Pune", "Remote/flexible", "Other India"] },
-  { id: "q15", text: "Long-term goal mix", type: "multi", options: ["Leadership", "Specialist/Expert", "Entrepreneurship", "Research/Academia"] },
+  { id: "q5", text: "What type of work excites you the most?", type: "single", options: ["Solving technical problems", "Creating or designing something new", "Helping people and improving lives", "Leading teams and making decisions", "Researching and learning deeply"] },
+  { id: "q6", text: "What kind of environment do you see yourself in?", type: "single", options: ["Office with computers", "Outdoors/travel-based work", "Lab/Research environment", "Creative studio (art, design, media)", "Hospital/clinic/teaching place"] },
+  { id: "q7", text: "If you could choose a project, which would you pick?", type: "single", options: ["Build a robot/app", "Paint/design a new product", "Organize a charity event", "Manage a business idea", "Do a scientific experiment"] },
+  { id: "q8", text: "Interest areas (choose all that apply)", type: "multi", options: ["AI/ML", "Web/App Development", "Data/Analytics", "Cloud/DevOps", "Cybersecurity", "UI/UX", "Product/Strategy", "Marketing/Sales", "Medicine", "Law", "Architecture", "Finance", "Arts & Media"] },
+  { id: "q9", text: "Pick domains you’re curious about (choose all that apply)", type: "multi", options: ["FinTech", "HealthTech", "EdTech", "E-commerce", "Gaming", "SaaS", "Manufacturing/IoT", "Law & Justice", "Architecture"] },
+  { id: "q10", text: "How important is salary in the first 3 years?", type: "single", options: ["Very high", "Moderate", "Less important"] },
+  { id: "q11", text: "Risk appetite (startups, experimentation)?", type: "single", options: ["High", "Medium", "Low"] },
+  { id: "q12", text: "Do you prefer research/theory or building things?", type: "single", options: ["Research/theory", "Balanced", "Hands-on building"] },
+  { id: "q13", text: "Comfort presenting ideas to an audience?", type: "single", options: ["Very", "Somewhat", "Not really"] },
+  { id: "q14", text: "Preferred learning mode", type: "single", options: ["Hands-on experiments & practice", "Imagining & creating new ideas", "Observing & helping others", "Discussing & debating", "Reading & researching deeply"] },
+  { id: "q15", text: "Tell me anything more which excites you (Descriptive answer — write freely)", type: "paragraph", options: [] },
 ];
 
 function Pill({ active, onClick, children }) {
@@ -166,7 +166,7 @@ export default function App() {
 
   // questions state
   const [qIdx, setQIdx] = useState(0);
-  const [answers, setAnswers] = useState({}); // mapping q.id -> array of options
+  const [answers, setAnswers] = useState({}); // mapping q.id -> array of options or [paragraph text]
 
   // results / roles
   const [roles, setRoles] = useState([]); // top 3 expected
@@ -207,6 +207,8 @@ export default function App() {
   }
 
   function toggleOption(q, opt) {
+    // paragraph type is handled separately (textarea) — don't toggle pills for it
+    if (q.type === "paragraph") return;
     setAnswers(prev => {
       const cur = new Set(prev[q.id] || []);
       if (q.type === "single") {
@@ -261,7 +263,7 @@ export default function App() {
     }
   }
 
-  // Handler used by the Start page "Comment" button so comments load before showing the form
+  // Handler used by the Start page "Insights" button so comments load before showing the form
   async function handleOpenAllComments() {
     await loadAllComments();
     setCommentTopic(""); setCommentName(""); setCommentText("");
@@ -311,12 +313,17 @@ export default function App() {
   }
 
   async function analyzeAnswers() {
-    // ensure all 15 questions answered (each question should have at least one option)
+    // ensure all 15 questions answered (each question should have at least one option or paragraph text)
     for (let i = 0; i < QUESTIONS.length; i++) {
       const q = QUESTIONS[i];
       if (!answers[q.id] || answers[q.id].length === 0) {
         alert(`Please answer question ${i + 1} before submitting.`);
         return;
+      }
+      // for paragraph, ensure non-empty string
+      if (q.type === "paragraph") {
+        const val = (answers[q.id][0] || "").trim();
+        if (!val) { alert(`Please answer question ${i + 1} before submitting.`); return; }
       }
     }
     setLoading(true); setError("");
@@ -512,7 +519,7 @@ export default function App() {
           </div>
           <div>
             <DarkBtn onClick={handleOpenAllComments} style={{ minWidth: 200 }}>
-              Comment {queuedCount > 0 ? `· ${queuedCount} unsent` : ""}
+              Insights {queuedCount > 0 ? `· ${queuedCount} unsent` : ""}
             </DarkBtn>
           </div>
         </div>
@@ -574,7 +581,11 @@ export default function App() {
   function renderQuestions() {
     const cur = QUESTIONS[qIdx];
     const curAnswers = answers[cur.id] || [];
-    const canNext = curAnswers && curAnswers.length > 0;
+    // canNext logic supports paragraph stored as [text]
+    let canNext = curAnswers && curAnswers.length > 0;
+    if (cur.type === "paragraph") {
+      canNext = (curAnswers && (curAnswers[0] || "").trim().length > 0);
+    }
     const isLast = qIdx === QUESTIONS.length - 1;
     return (
       <div style={{ display: "grid", placeItems: "center", paddingTop: 24 }}>
@@ -588,10 +599,21 @@ export default function App() {
             display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center",
             justifyContent: "center", marginBottom: 18
           }}>
-            {cur.options.map(opt => {
-              const active = (answers[cur.id] || []).includes(opt);
-              return <Pill key={opt} active={active} onClick={() => toggleOption(cur, opt)}>{opt}</Pill>;
-            })}
+            {cur.type === "paragraph" ? (
+              <div style={{ width: "100%", display: "flex", justifyContent: "center" }}>
+                <textarea
+                  value={curAnswers[0] || ""}
+                  onChange={e => setAnswers(prev => ({ ...prev, [cur.id]: [e.target.value] }))}
+                  placeholder="Write your answer here..."
+                  style={{ width: "100%", minHeight: 160, padding: 12, borderRadius: 8, border: "1px solid #ddd" }}
+                />
+              </div>
+            ) : (
+              (cur.options || []).map(opt => {
+                const active = (answers[cur.id] || []).includes(opt);
+                return <Pill key={opt} active={active} onClick={() => toggleOption(cur, opt)}>{opt}</Pill>;
+              })
+            )}
           </div>
 
           <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
@@ -748,7 +770,7 @@ export default function App() {
 
           <div style={{ display: "flex", gap: 12, justifyContent: "center", marginTop: 18 }}>
             <DarkBtn onClick={() => setStep("thanks")}>Done</DarkBtn>
-            <DarkBtn onClick={() => openRoleComments(selectedRole.title)}>Comments</DarkBtn>
+            <DarkBtn onClick={() => openRoleComments(selectedRole.title)}>Insights</DarkBtn>
             <DarkBtn onClick={() => getStayAhead(selectedRole.title)}>Stay Ahead</DarkBtn>
 
             {/* NEW BUTTON: Search a Mentor (opens LinkedIn People search in a new tab).
@@ -814,7 +836,7 @@ export default function App() {
           </div>
 
           <div style={{ marginTop: 12, color: "#333", fontSize: 13 }}>
-            <div><strong>Note:</strong> Adding new comments is disabled on the roadmap page. To add a comment, go back to the home page and choose <em>Comment</em>.</div>
+            <div><strong>Note:</strong> Adding new comments is disabled on the roadmap page. To add a comment, go back to the home page and choose <em>Insights</em>.</div>
           </div>
         </div>
       </div>
@@ -847,7 +869,7 @@ export default function App() {
           </div>
 
           <div style={{ display: "flex", gap: 12, justifyContent: "center", marginTop: 16 }}>
-            <DarkBtn onClick={() => setStep("comments_role")}>Comments</DarkBtn>
+            <DarkBtn onClick={() => setStep("comments_role")}>Insights</DarkBtn>
             <DarkBtn onClick={() => setStep("thanks")}>Done</DarkBtn>
           </div>
         </div>
@@ -898,4 +920,3 @@ export default function App() {
     </div>
   );
 }
-

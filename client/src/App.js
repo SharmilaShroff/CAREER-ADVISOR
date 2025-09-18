@@ -1,5 +1,5 @@
 // App.jsx
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 
 const API_BASE = "https://career-advisor-backend-o08l.onrender.com"; // change if your backend is deployed
 
@@ -82,6 +82,77 @@ function LoadingOverlay({ text = "Thinking..." }) {
   );
 }
 
+// ---------- Helper: safe fetch + JSON parsing ----------
+async function fetchWithJson(url, opts = {}) {
+  // returns: { ok, status, json (or null), text }
+  const r = await fetch(url, opts);
+  const text = await r.text();
+  let json = null;
+  const ct = (r.headers.get("content-type") || "").toLowerCase();
+  if (ct.includes("application/json")) {
+    try {
+      json = JSON.parse(text);
+    } catch (e) {
+      json = null;
+    }
+  } else {
+    // try best-effort parse if server returned JSON with wrong header
+    try {
+      json = JSON.parse(text);
+    } catch (e) {
+      json = null;
+    }
+  }
+  return { ok: r.ok, status: r.status, json, text };
+}
+// ------------------------------------------------------
+
+// ---------- Queue helpers (localStorage) ----------
+function getQueuedCommentsFromStorage() {
+  try {
+    const raw = localStorage.getItem("queued_comments");
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr;
+  } catch (e) {
+    return [];
+  }
+}
+function setQueuedCommentsToStorage(list) {
+  try { localStorage.setItem("queued_comments", JSON.stringify(list)); } catch (e) {}
+}
+function queueCommentLocal(comment) {
+  const q = getQueuedCommentsFromStorage();
+  q.push(comment);
+  setQueuedCommentsToStorage(q);
+}
+// attempt to resend queued comments and remove successful ones
+async function retryQueuedCommentsOnce() {
+  const queued = getQueuedCommentsFromStorage();
+  if (!queued.length) return;
+  const remaining = [];
+  for (const c of queued) {
+    try {
+      const res = await fetchWithJson(`${API_BASE}/api/comments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: c.name, text: c.text, role: c.role, timestamp: c.timestamp })
+      });
+      if (!res.ok) {
+        // keep it in queue
+        remaining.push(c);
+      } else {
+        // posted successfully — skip
+      }
+    } catch (e) {
+      remaining.push(c);
+    }
+  }
+  setQueuedCommentsToStorage(remaining);
+}
+// ------------------------------------------------------
+
 export default function App() {
   // UI steps: start | comment_form | questions | results | detail | path | comments_role | stay | thanks
   const [step, setStep] = useState("start");
@@ -105,9 +176,27 @@ export default function App() {
 
   // comments for roles
   const [roleComments, setRoleComments] = useState([]);
+  const [allComments, setAllComments] = useState([]); // store all comments for comment_form
 
   // stay ahead tips
   const [stayTips, setStayTips] = useState([]);
+
+  // show queued count in UI if desired
+  const [queuedCount, setQueuedCount] = useState(() => getQueuedCommentsFromStorage().length);
+
+  useEffect(() => {
+    // try resend queued comments on app start
+    (async () => {
+      try {
+        await retryQueuedCommentsOnce();
+      } catch (e) {
+        // ignore
+      } finally {
+        setQueuedCount(getQueuedCommentsFromStorage().length);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // helpers
   function safeText(v) {
@@ -132,27 +221,92 @@ export default function App() {
   const currentQ = QUESTIONS[qIdx];
 
   // API calls: analyze, details, pathway, comments, stayahead
+
+  // Load all comments (for the comment form on start)
+  async function loadAllComments() {
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetchWithJson(`${API_BASE}/api/comments`);
+      if (!res.ok) {
+        // backend returned error or non-200 — do not crash, show fallback
+        console.warn("loadAllComments non-ok:", res.status, res.text);
+        // still merge queued comments for display so user sees their submissions
+        const queued = getQueuedCommentsFromStorage();
+        setAllComments([...queued.slice().sort((a,b)=> (b.timestamp||0)-(a.timestamp||0))]);
+        return;
+      }
+      const data = res.json || null;
+      let serverComments = [];
+      if (data && Array.isArray(data.comments)) {
+        serverComments = data.comments;
+      }
+      // merge queued comments to show them immediately (avoid duplicates by localId if present)
+      const queued = getQueuedCommentsFromStorage();
+      const merged = [...serverComments];
+      for (const qc of queued) {
+        // try simple dedupe: if same text+role+name exists in server, skip
+        const dup = merged.find(sc => sc.text === qc.text && sc.role === qc.role && (sc.name || "Anonymous") === (qc.name || "Anonymous"));
+        if (!dup) merged.push(qc);
+      }
+      merged.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+      setAllComments(merged);
+    } catch (e) {
+      console.error("loadAllComments failed:", e);
+      const queued = getQueuedCommentsFromStorage();
+      setAllComments([...queued.slice().sort((a,b)=> (b.timestamp||0)-(a.timestamp||0))]);
+    } finally {
+      setLoading(false);
+      setQueuedCount(getQueuedCommentsFromStorage().length);
+    }
+  }
+
+  // Handler used by the Start page "Comment" button so comments load before showing the form
+  async function handleOpenAllComments() {
+    await loadAllComments();
+    setCommentTopic(""); setCommentName(""); setCommentText("");
+    setStep("comment_form");
+  }
+
   async function submitCommentFromStart() {
     // topic and comment mandatory per your requirement
     if (!commentTopic.trim() || !commentText.trim()) {
       alert("Please enter Topic and Comment to submit.");
       return;
     }
-    setLoading(true);
-    setError("");
+    setLoading(true); setError("");
+    const commentObj = { name: commentName || "Anonymous", text: commentText, role: commentTopic.trim(), timestamp: Date.now(), localId: `local-${Date.now()}-${Math.random()}` };
     try {
-      // post to backend
-      await fetch(`${API_BASE}/api/comments`, {
+      const res = await fetchWithJson(`${API_BASE}/api/comments`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: commentName || "Anonymous", text: commentText, role: commentTopic.trim() })
+        body: JSON.stringify({ name: commentObj.name, text: commentObj.text, role: commentObj.role, timestamp: commentObj.timestamp })
       });
-      // after post, go back to start
+      if (!res.ok) {
+        // posting failed (server error or returned non-JSON) — queue locally & show optimistic UI
+        queueCommentLocal(commentObj);
+        setQueuedCount(getQueuedCommentsFromStorage().length);
+        // show in UI (merge into allComments)
+        setAllComments(prev => [commentObj, ...prev]);
+        alert("Failed to submit comment to server. Your comment was saved locally and will be retried automatically.");
+      } else {
+        // success - if server returns created comment, prefer server version, else use local
+        // refresh comments
+        await loadAllComments();
+        alert("Comment submitted — thank you!");
+      }
       setCommentTopic(""); setCommentName(""); setCommentText("");
       setStep("start");
-      alert("Comment submitted — thank you!");
     } catch (e) {
-      setError("Failed to submit comment");
+      console.error("submitCommentFromStart failed:", e);
+      // queue and show optimistic
+      queueCommentLocal(commentObj);
+      setQueuedCount(getQueuedCommentsFromStorage().length);
+      setAllComments(prev => [commentObj, ...prev]);
+      setError("Failed to submit comment; saved locally and will retry.");
+      alert("Failed to submit comment to server. Your comment was saved locally and will be retried automatically.");
+      setCommentTopic(""); setCommentName(""); setCommentText("");
+      setStep("start");
     } finally { setLoading(false); }
   }
 
@@ -167,16 +321,16 @@ export default function App() {
     }
     setLoading(true); setError("");
     try {
-      const r = await fetch(`${API_BASE}/api/analyze`, {
+      const res = await fetchWithJson(`${API_BASE}/api/analyze`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ answers })
       });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data?.error || "Analyze failed");
-      // expecting data.roles = [{title, description, avg_salary_INR, why_fit}, ...]
+      if (!res.ok) throw new Error(res.json?.error || `Analyze failed: ${res.status}`);
+      const data = res.json || {};
       setRoles(data.roles?.slice(0, 3) || []);
       setStep("results");
     } catch (e) {
+      console.error("analyzeAnswers:", e);
       setError(e.message || "Analyze failed");
     } finally { setLoading(false); }
   }
@@ -185,15 +339,15 @@ export default function App() {
     setSelectedRole(role);
     setLoading(true); setError("");
     try {
-      const r = await fetch(`${API_BASE}/api/details`, {
+      const res = await fetchWithJson(`${API_BASE}/api/details`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: role.title })
       });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data?.error || "Details failed");
-      setRoleDetail(data); // expecting data.concepts (array), data.youtube_queries maybe
+      if (!res.ok) throw new Error(res.json?.error || `Details failed: ${res.status}`);
+      setRoleDetail(res.json || {});
       setStep("detail");
     } catch (e) {
+      console.error("loadDetails:", e);
       setError(e.message || "Failed to fetch details");
     } finally { setLoading(false); }
   }
@@ -204,15 +358,15 @@ export default function App() {
     setLoading(true); setError("");
     try {
       const title = (role || selectedRole).title;
-      const r = await fetch(`${API_BASE}/api/pathway`, {
+      const res = await fetchWithJson(`${API_BASE}/api/pathway`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title })
       });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data?.error || "Pathway failed");
-      setPathway(data); // expecting detailed roadmap structure
+      if (!res.ok) throw new Error(res.json?.error || `Pathway failed: ${res.status}`);
+      setPathway(res.json || {});
       setStep("path");
     } catch (e) {
+      console.error("generateRoadmap:", e);
       setError(e.message || "Failed to generate roadmap");
     } finally { setLoading(false); }
   }
@@ -220,35 +374,85 @@ export default function App() {
   async function openRoleComments(roleTitle) {
     setLoading(true); setError("");
     try {
-      const r = await fetch(`${API_BASE}/api/comments?role=${encodeURIComponent(roleTitle)}`);
-      const data = await r.json();
-      if (!r.ok) throw new Error(data?.error || "Failed to fetch comments");
-      const c = data.comments || [];
-      if (c.length === 0) {
-        // if backend doesn't provide a seed AI comment, use a client-side fallback message:
-        setRoleComments([{ id: "ai-1", name: "AI suggestion", text: `No user comments yet for "${roleTitle}". Example comment: "I found this role aligns with strong problem-solving and communication. Great for those who enjoy building products and collaborating with teams."`, role: roleTitle, timestamp: Date.now() }]);
+      const res = await fetchWithJson(`${API_BASE}/api/comments?role=${encodeURIComponent(roleTitle)}`);
+      let merged = [];
+      if (!res.ok) {
+        console.warn("openRoleComments non-ok:", res.status, res.text);
+        // fallback: show queued comments for that role or AI suggestion
+        const queued = getQueuedCommentsFromStorage().filter(q => q.role === roleTitle);
+        if (queued.length) merged = queued.slice().sort((a,b)=>(b.timestamp||0)-(a.timestamp||0));
+        else {
+          merged = [{ id: "ai-1", name: "AI suggestion", text: `No user comments yet for "${roleTitle}". Example comment: "I found this role aligns with strong problem-solving and communication. Great for those who enjoy building products and collaborating with teams."`, role: roleTitle, timestamp: Date.now() }];
+        }
       } else {
-        setRoleComments(c);
+        const data = res.json || {};
+        const serverComments = data.comments || [];
+        // merge queued comments for this role
+        const queued = getQueuedCommentsFromStorage().filter(q => q.role === roleTitle);
+        merged = [...serverComments];
+        for (const qc of queued) {
+          const dup = merged.find(sc => sc.text === qc.text && sc.role === qc.role && (sc.name || "Anonymous") === (qc.name || "Anonymous"));
+          if (!dup) merged.push(qc);
+        }
+        merged.sort((a,b)=> (b.timestamp||0)-(a.timestamp||0));
+        if (merged.length === 0) {
+          merged = [{ id: "ai-1", name: "AI suggestion", text: `No user comments yet for "${roleTitle}". Example comment: "I found this role aligns with strong problem-solving and communication. Great for those who enjoy building products and collaborating with teams."`, role: roleTitle, timestamp: Date.now() }];
+        }
       }
+      setRoleComments(merged);
+      setSelectedRole({ title: roleTitle });
       setStep("comments_role");
     } catch (e) {
-      setError(e.message || "Failed to load comments");
-    } finally { setLoading(false); }
+      console.error("openRoleComments failed:", e);
+      const queued = getQueuedCommentsFromStorage().filter(q => q.role === roleTitle);
+      if (queued.length) setRoleComments(queued.slice().sort((a,b)=>(b.timestamp||0)-(a.timestamp||0)));
+      else setRoleComments([{ id: "ai-1", name: "AI suggestion", text: `No user comments yet for "${roleTitle}". Example comment: "I found this role aligns with strong problem-solving and communication. Great for those who enjoy building products and collaborating with teams."`, role: roleTitle, timestamp: Date.now() }]);
+      setSelectedRole({ title: roleTitle });
+      setStep("comments_role");
+    } finally { setLoading(false); setQueuedCount(getQueuedCommentsFromStorage().length); }
   }
 
   async function getStayAhead(roleTitle) {
     setLoading(true); setError("");
     try {
-      const r = await fetch(`${API_BASE}/api/stayahead`, {
+      const res = await fetchWithJson(`${API_BASE}/api/stayahead`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: roleTitle, answers })
       });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data?.error || "Stay ahead failed");
-      setStayTips(data.tips || []); // expecting array of tips
+      if (!res.ok) {
+        console.warn("getStayAhead non-ok:", res.status, res.text);
+        setStayTips([
+          "Top certification suggestion related to the role.",
+          "Specific online course project to build and showcase.",
+          "Key soft skill to practise and where to practise it.",
+          "Suggested internship type and how to approach recruiters.",
+          "Portfolio / GitHub ideas to demonstrate skills.",
+          "Networking & mentorship actions (what to say & where)."
+        ]);
+        setStep("stay");
+        return;
+      }
+      const data = res.json || {};
+      setStayTips(data.tips || [
+        "Top certification suggestion related to the role.",
+        "Specific online course project to build and showcase.",
+        "Key soft skill to practise and where to practise it.",
+        "Suggested internship type and how to approach recruiters.",
+        "Portfolio / GitHub ideas to demonstrate skills.",
+        "Networking & mentorship actions (what to say & where)."
+      ]);
       setStep("stay");
     } catch (e) {
-      setError(e.message || "Failed to get Stay Ahead tips");
+      console.error("getStayAhead failed:", e);
+      setStayTips([
+        "Top certification suggestion related to the role.",
+        "Specific online course project to build and showcase.",
+        "Key soft skill to practise and where to practise it.",
+        "Suggested internship type and how to approach recruiters.",
+        "Portfolio / GitHub ideas to demonstrate skills.",
+        "Networking & mentorship actions (what to say & where)."
+      ]);
+      setStep("stay");
     } finally { setLoading(false); }
   }
 
@@ -258,6 +462,7 @@ export default function App() {
     setQIdx(0); setAnswers({});
     setRoles([]); setSelectedRole(null); setRoleDetail(null); setPathway(null);
     setRoleComments([]); setStayTips([]); setError(""); setLoading(false);
+    setQueuedCount(getQueuedCommentsFromStorage().length);
   }
 
   function downloadReportPDF() {
@@ -306,7 +511,9 @@ export default function App() {
             <DarkBtn onClick={() => setStep("questions")} style={{ minWidth: 200 }}>Start Career Advisor</DarkBtn>
           </div>
           <div>
-            <DarkBtn onClick={() => setStep("comment_form")} style={{ minWidth: 200 }}>Comment</DarkBtn>
+            <DarkBtn onClick={handleOpenAllComments} style={{ minWidth: 200 }}>
+              Comment {queuedCount > 0 ? `· ${queuedCount} unsent` : ""}
+            </DarkBtn>
           </div>
         </div>
       </div>
@@ -315,26 +522,49 @@ export default function App() {
 
   function renderCommentForm() {
     const canSubmit = commentTopic.trim().length > 0 && commentText.trim().length > 0;
+
     return (
       <div style={{ display: "grid", placeItems: "center", paddingTop: 40 }}>
         <div style={{ width: 760, background: "#fff", padding: 20, borderRadius: 14, boxShadow: "0 6px 30px rgba(0,0,0,0.06)" }}>
-          <h2 style={{ marginTop: 0 }}>Post a comment</h2>
-          <div style={{ marginBottom: 12 }}>
-            <label style={{ display: "block", fontWeight: 600, marginBottom: 6 }}>Topic (role) — required</label>
-            <input value={commentTopic} onChange={e => setCommentTopic(e.target.value)} placeholder="e.g. Product Manager" style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ddd" }} />
+          <h2 style={{ marginTop: 0 }}>Community comments</h2>
+
+          <div style={{ maxHeight: 220, overflow: "auto", border: "1px solid #eee", padding: 10, borderRadius: 8, marginBottom: 12 }}>
+            {allComments.length === 0 ? (
+              <div style={{ color: "#666" }}>No comments yet or failed to load comments from server. Be the first to share your experience!</div>
+            ) : (
+              allComments.map(c => (
+                <div key={c.id || c.localId || (c.timestamp + Math.random())} style={{ borderBottom: "1px solid #f2f2f2", padding: 8 }}>
+                  <div style={{ fontWeight: 700 }}>{safeText(c.name)} <span style={{ fontWeight: 500, color: "#666", fontSize: 12 }}>· {new Date(c.timestamp || Date.now()).toLocaleString()}</span></div>
+                  <div style={{ marginTop: 6 }}>{safeText(c.text)}</div>
+                  <div style={{ marginTop: 6, fontSize: 12, color: "#666" }}><b>Role:</b> {safeText(c.role)}{c.localId ? " · (unsent)" : ""}</div>
+                </div>
+              ))
+            )}
           </div>
-          <div style={{ marginBottom: 12 }}>
-            <label style={{ display: "block", fontWeight: 600, marginBottom: 6 }}>Comment — required</label>
-            <textarea value={commentText} onChange={e => setCommentText(e.target.value)} placeholder="Write your comment..." style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ddd", minHeight: 120 }} />
+
+          <div style={{ marginBottom: 12, color: "#333" }}>
+            <strong>Share your experience or opinion below.</strong> Please enter your name (optional), the role you're commenting about, and your comment.
           </div>
-          <div style={{ marginBottom: 16 }}>
+
+          {/* Inputs in order: Name (optional), Role (required), Comment (required) */}
+          <div style={{ marginBottom: 12 }}>
             <label style={{ display: "block", fontWeight: 600, marginBottom: 6 }}>Your name — optional</label>
             <input value={commentName} onChange={e => setCommentName(e.target.value)} placeholder="Your name (optional)" style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ddd" }} />
           </div>
 
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ display: "block", fontWeight: 600, marginBottom: 6 }}>Role (topic) — required</label>
+            <input value={commentTopic} onChange={e => setCommentTopic(e.target.value)} placeholder="e.g. Product Manager" style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ddd" }} />
+          </div>
+
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ display: "block", fontWeight: 600, marginBottom: 6 }}>Comment — required</label>
+            <textarea value={commentText} onChange={e => setCommentText(e.target.value)} placeholder="Write your comment..." style={{ width: "100%", padding: 10, borderRadius: 8, border: "1px solid #ddd", minHeight: 120 }} />
+          </div>
+
           <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
-            <DarkBtn onClick={() => { setStep("start"); }} style={{ minWidth: 140 }}>Back</DarkBtn>
-            <DarkBtn onClick={submitCommentFromStart} disabled={!canSubmit} style={{ minWidth: 140 }}>Submit</DarkBtn>
+            <DarkBtn onClick={() => { setStep("start"); }}>Back</DarkBtn>
+            <DarkBtn onClick={submitCommentFromStart} disabled={!canSubmit}>Submit</DarkBtn>
           </div>
         </div>
       </div>
@@ -397,7 +627,8 @@ export default function App() {
                 <div style={{ marginTop: 8 }}><b>Average salary (INR):</b> {safeText(r.avg_salary_INR || r.avg_salary || "—")}</div>
                 <div style={{ marginTop: 8, color: "#666" }}><b>Why suggested:</b> {safeText(r.why_fit || r.reason || "")}</div>
                 <div style={{ display: "flex", justifyContent: "center", gap: 10, marginTop: 12 }}>
-                  <DarkBtn onClick={() => loadDetails(r)}>More details →</DarkBtn>
+                  <DarkBtn onClick={() => loadDetails(r)}>More details →
+                  </DarkBtn>
                 </div>
               </div>
             ))}
@@ -508,6 +739,7 @@ export default function App() {
     );
   }
 
+  // --- UPDATED: Read-only comments view for roadmap page ---
   function renderCommentsForRole() {
     return (
       <div style={{ display: "grid", placeItems: "center", paddingTop: 24 }}>
@@ -519,44 +751,30 @@ export default function App() {
             </div>
           </div>
 
-          <div style={{ marginTop: 12 }}>
-            {roleComments.length === 0 ? <div>No comments yet.</div> : roleComments.map(c => (
-              <div key={c.id || (c.timestamp + Math.random())} style={{ borderBottom: "1px solid #eee", padding: 10 }}>
-                <div style={{ fontWeight: 700 }}>{safeText(c.name)} <span style={{ fontWeight: 500, color: "#666", fontSize: 12 }}>· {new Date(c.timestamp || Date.now()).toLocaleString()}</span></div>
-                <div style={{ marginTop: 6 }}>{safeText(c.text)}</div>
-              </div>
-            ))}
+          <div style={{ marginTop: 12, maxHeight: 420, overflow: "auto", paddingRight: 8 }}>
+            {roleComments.length === 0 ? (
+              <div style={{ color: "#666" }}>No comments yet for this role.</div>
+            ) : (
+              roleComments.map(c => (
+                <div key={c.id || c.localId || (c.timestamp + Math.random())} style={{ borderBottom: "1px solid #eee", padding: 10 }}>
+                  <div style={{ fontWeight: 700 }}>{safeText(c.name)} <span style={{ fontWeight: 500, color: "#666", fontSize: 12 }}>· {new Date(c.timestamp || Date.now()).toLocaleString()}</span></div>
+                  <div style={{ marginTop: 6 }}>{safeText(c.text)}</div>
+                  <div style={{ fontSize: 12, color: "#666", marginTop: 6 }}>
+                    {c.auto ? "AI-generated sample" : (c.localId ? "(unsent — will retry automatically)" : "")}
+                  </div>
+                </div>
+              ))
+            )}
           </div>
 
-          <div style={{ marginTop: 12 }}>
-            <div style={{ marginBottom: 8 }}><b>Post a comment for this role</b></div>
-            <input placeholder="Role (auto-filled)" value={selectedRole?.title || ""} disabled style={{ width: "100%", padding: 8, marginBottom: 8 }} />
-            <input placeholder="Your name (optional)" value={commentName} onChange={e => setCommentName(e.target.value)} style={{ width: "100%", padding: 8, marginBottom: 8 }} />
-            <textarea placeholder="Write your comment..." value={commentText} onChange={e => setCommentText(e.target.value)} style={{ width: "100%", padding: 8, minHeight: 100 }} />
-            <div style={{ display: "flex", gap: 12, justifyContent: "center", marginTop: 10 }}>
-              <DarkBtn onClick={async () => {
-                // post comment for this role
-                if (!commentText.trim()) { alert("Comment required."); return; }
-                setLoading(true);
-                try {
-                  await fetch(`${API_BASE}/api/comments`, {
-                    method: "POST", headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ name: commentName || "Anonymous", text: commentText.trim(), role: selectedRole.title })
-                  });
-                  // reload comments
-                  await openRoleComments(selectedRole.title);
-                  setCommentText(""); setCommentName("");
-                } catch (e) {
-                  alert("Failed to post comment");
-                } finally { setLoading(false); }
-              }}>Post</DarkBtn>
-              <DarkBtn onClick={() => { setCommentText(""); setCommentName(""); }}>Clear</DarkBtn>
-            </div>
+          <div style={{ marginTop: 12, color: "#333", fontSize: 13 }}>
+            <div><strong>Note:</strong> Adding new comments is disabled on the roadmap page. To add a comment, go back to the home page and choose <em>Comment</em>.</div>
           </div>
         </div>
       </div>
     );
   }
+  // --- end updated section ---
 
   function renderStayAhead() {
     return (
@@ -625,7 +843,7 @@ export default function App() {
         {step === "comment_form" && renderCommentForm()}
         {step === "questions" && renderQuestions()}
         {step === "results" && renderResults()}
-        {step === "detail" && renderDetail()}S
+        {step === "detail" && renderDetail()}
         {step === "path" && renderPathway()}
         {step === "comments_role" && renderCommentsForRole()}
         {step === "stay" && renderStayAhead()}
@@ -634,5 +852,3 @@ export default function App() {
     </div>
   );
 }
-
-

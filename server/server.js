@@ -23,7 +23,19 @@ const COMMENTS_FILE = path.join(__dirname, "comments.json");
 // Ensure comments file exists
 function ensureCommentsFile() {
   if (!fs.existsSync(COMMENTS_FILE)) {
-    fs.writeFileSync(COMMENTS_FILE, JSON.stringify({ comments: [] }, null, 2));
+    fs.writeFileSync(COMMENTS_FILE, JSON.stringify({ comments: [] }, null, 2), "utf8");
+  } else {
+    // make sure it's valid JSON with comments array
+    try {
+      const raw = fs.readFileSync(COMMENTS_FILE, "utf8");
+      const db = JSON.parse(raw);
+      if (!Array.isArray(db.comments)) {
+        fs.writeFileSync(COMMENTS_FILE, JSON.stringify({ comments: [] }, null, 2), "utf8");
+      }
+    } catch (e) {
+      // overwrite corrupted file
+      fs.writeFileSync(COMMENTS_FILE, JSON.stringify({ comments: [] }, null, 2), "utf8");
+    }
   }
 }
 ensureCommentsFile();
@@ -195,74 +207,255 @@ Return only valid JSON.
 });
 
 // --- COMMENTS persistence (file-based) ---
-// GET /api/comments?role=ROLE  -> returns comments (latest first). If role provided and none found, generate a seed comment via AI (not persisted).
-// POST /api/comments -> { name, text, role } persisted.
+// GET /api/comments?role=ROLE  -> returns comments (newest first). Fuzzy matching + AI seed if none found.
+// POST /api/comments -> { name, text, role } persisted with canonicalization/tokens.
 
-app.get("/api/comments", async (req, res) => {
-  try {
-    const role = req.query.role ? String(req.query.role).trim() : null;
-    ensureCommentsFile();
-    const raw = fs.readFileSync(COMMENTS_FILE, "utf8");
-    const db = JSON.parse(raw);
-    let comments = Array.isArray(db.comments) ? db.comments.slice().reverse() : []; // newest first
+// Path to comments file (already defined earlier as COMMENTS_FILE in your file)
+const atomicWriteFileSync = (targetPath, dataStr) => {
+  const tmp = `${targetPath}.tmp`;
+  fs.writeFileSync(tmp, dataStr, "utf8");
+  fs.renameSync(tmp, targetPath);
+};
 
-    if (role) {
-      comments = comments.filter(c => String(c.role || "").toLowerCase() === role.toLowerCase());
-    }
+// Helper: deterministic tokenization & simple heuristic canonicalizer (fast fallback)
+function deterministicCanonical(roleStr) {
+  const r = String(roleStr || "").trim();
+  const strip = s => s.replace(/\(.*?\)/g, "").replace(/\s+in\s+.*$/i, "").replace(/\s+for\s+.*$/i, "").replace(/[-–—].*$/g, "").trim();
+  let candidate = strip(r);
+  const words = candidate.split(/\s+/).filter(Boolean);
+  if (!words.length) candidate = r;
+  else if (words.length > 4) candidate = words.slice(0, 4).join(" ");
+  // Capitalize
+  const canonical = candidate.split(/\s+/).map(w => w[0]?.toUpperCase() + w.slice(1)).join(" ");
+  const aliases = [r, canonical].filter(Boolean);
+  const tokens = canonical
+    .toLowerCase()
+    .replace(/[^\w\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  return { canonical, aliases, tokens };
+}
 
-    // if role requested and no comments -> generate a seed example comment from AI (but do not persist)
-    if (role && comments.length === 0) {
-      try {
-        const prompt = `
-You are an experienced professional. Write one helpful 2-3 sentence comment about working as a "${role}".
-Include one short certification/book suggestion and one practical mini project idea.
-Return JSON: { "name": "string", "text": "string", "role": "${role}" }
+// AI-backed canonicalization (tries Gemini - falls back to deterministic)
+async function canonicalizeRole(roleStr) {
+  const role = String(roleStr || "").trim();
+  if (!role) return deterministicCanonical(role);
+
+  // prompt for Gemini to return canonical + aliases
+  const prompt = `
+You are a concise normalizer. Given a user-provided role string, return EXACT JSON:
+{
+  "canonical": "a short canonical role title (e.g. Product Manager)",
+  "aliases": ["cleaned variants including the original"]
+}
+Input: "${role.replace(/"/g, '\\"')}"
 Return only valid JSON.
 `;
-        const parsed = await callGeminiJSON(prompt, 0.25);
-        const seed = {
-          id: `seed-${Date.now()}`,
-          name: parsed?.name ? String(parsed.name) : "Pro Tip",
-          text: parsed?.text ? String(parsed.text) : String(parsed).slice(0,300),
-          role: role,
-          timestamp: Date.now(),
-          auto: true
-        };
-        return res.json({ comments: [seed] });
-      } catch (err) {
-        // fallback to empty
-        return res.json({ comments: [] });
+  try {
+    const parsed = await callGeminiJSON(prompt, 0.25);
+    const canonical = parsed?.canonical ? String(parsed.canonical).trim() : null;
+    const aliases = Array.isArray(parsed?.aliases) ? parsed.aliases.map(a => String(a).trim()).filter(Boolean) : [];
+    if (canonical) {
+      const tokens = canonical
+        .toLowerCase()
+        .replace(/[^\w\s]/g, " ")
+        .split(/\s+/)
+        .filter(Boolean);
+      return { canonical, aliases: aliases.length ? aliases : [role], tokens };
+    }
+  } catch (e) {
+    // fallthrough to deterministic
+    console.warn("AI canonicalize failed, using heuristic:", e?.message || e);
+  }
+  return deterministicCanonical(role);
+}
+
+// token overlap score (0..1)
+function tokenOverlapScore(tokensA, tokensB) {
+  if (!Array.isArray(tokensA) || !Array.isArray(tokensB) || tokensA.length === 0 || tokensB.length === 0) return 0;
+  const setB = new Set(tokensB);
+  let common = 0;
+  for (const t of tokensA) if (setB.has(t)) common++;
+  return common / Math.max(tokensA.length, tokensB.length);
+}
+
+// Make sure file exists and top-level shape valid
+function ensureCommentsFileSafe() {
+  ensureCommentsFile(); // your existing helper ensures basic file exists
+  try {
+    const raw = fs.readFileSync(COMMENTS_FILE, "utf8");
+    const db = JSON.parse(raw);
+    if (!Array.isArray(db.comments)) {
+      atomicWriteFileSync(COMMENTS_FILE, JSON.stringify({ comments: [] }, null, 2));
+    }
+  } catch (e) {
+    atomicWriteFileSync(COMMENTS_FILE, JSON.stringify({ comments: [] }, null, 2));
+  }
+}
+
+// Generate AI seed comment (not persisted) for a role
+async function generateSeedComment(role) {
+  try {
+    const prompt = `
+You are an experienced professional. Write one helpful 2-3 sentence comment about working as a "${role}".
+Include one short certification/book suggestion and one practical mini project idea.
+Return EXACT JSON: { "name": "string", "text": "string", "role": "${role}" }
+Return only valid JSON.
+`;
+    const parsed = await callGeminiJSON(prompt, 0.25);
+    const seed = {
+      id: `seed-${Date.now()}`,
+      name: parsed?.name ? String(parsed.name) : "Pro Tip",
+      text: parsed?.text ? String(parsed.text) : String(parsed).slice(0, 300),
+      role: role,
+      canonicalRole: role,
+      aliases: [role],
+      tokens: (role || "").toLowerCase().split(/\s+/).filter(Boolean),
+      timestamp: Date.now(),
+      auto: true
+    };
+    return seed;
+  } catch (e) {
+    console.warn("Seed generation failed:", e?.message || e);
+    return null;
+  }
+}
+
+// GET comments (with optional role fuzzy matching)
+// If ?role= provided -> return all relevant comments for that role (exact canonical + fuzzy matches)
+app.get("/api/comments", async (req, res) => {
+  try {
+    const roleQuery = req.query.role ? String(req.query.role).trim() : null;
+    ensureCommentsFileSafe();
+    const raw = fs.readFileSync(COMMENTS_FILE, "utf8");
+    const db = JSON.parse(raw);
+    let comments = Array.isArray(db.comments) ? db.comments.slice() : [];
+
+    // normalize stored comments if they lack metadata (best-effort deterministic)
+    let modified = false;
+    for (let i = 0; i < comments.length; i++) {
+      const c = comments[i];
+      if (!c.canonicalRole || !Array.isArray(c.tokens) || !Array.isArray(c.aliases)) {
+        const heur = deterministicCanonical(c.role || c.topic || "");
+        c.canonicalRole = c.canonicalRole || heur.canonical;
+        c.aliases = Array.isArray(c.aliases) && c.aliases.length ? c.aliases : heur.aliases;
+        c.tokens = Array.isArray(c.tokens) && c.tokens.length ? c.tokens : heur.tokens;
+        modified = true;
+      }
+    }
+    // persist back if we added metadata (keeps future reads faster)
+    if (modified) {
+      try {
+        atomicWriteFileSync(COMMENTS_FILE, JSON.stringify({ comments }, null, 2));
+      } catch (e) {
+        console.warn("Failed to persist comments metadata:", e?.message || e);
       }
     }
 
-    return res.json({ comments });
+    // show newest-first by default
+    comments.sort((a, b) => (b.timestamp || b.createdAt || 0) - (a.timestamp || a.createdAt || 0));
+
+    if (!roleQuery) {
+      // return all comments newest-first
+      return res.json({ comments });
+    }
+
+    // canonicalize the query role (AI preferred, fallback deterministic)
+    const qCanonObj = await canonicalizeRole(roleQuery);
+    const qCanon = qCanonObj.canonical;
+    const qTokens = qCanonObj.tokens;
+
+    // Build match list with scoring
+    const matches = [];
+    for (const c of comments) {
+      const storedCanon = String(c.canonicalRole || "").trim();
+      const storedTokens = Array.isArray(c.tokens) ? c.tokens : [];
+      const storedRoleLower = String(c.role || "").toLowerCase();
+      let score = 0;
+
+      // exact canonical match (strong)
+      if (storedCanon && qCanon && storedCanon.toLowerCase() === qCanon.toLowerCase()) {
+        score += 2.0;
+      }
+
+      // token overlap
+      const overlap = tokenOverlapScore(qTokens, storedTokens);
+      score += overlap * 2.0; // scale
+
+      // substring match on raw role or canonical
+      if (storedRoleLower.includes(roleQuery.toLowerCase()) || (storedCanon && storedCanon.toLowerCase().includes(roleQuery.toLowerCase()))) {
+        score += 0.5;
+      }
+
+      // small recency boost (newer slightly higher)
+      const ageMs = Date.now() - (c.timestamp || c.createdAt || Date.now());
+      const recencyBoost = Math.max(0, 1 - Math.min(ageMs / (1000 * 60 * 60 * 24 * 365), 1)); // 0..1
+      score += recencyBoost * 0.1;
+
+      // If score exceeds a small threshold include it
+      if (score > 0.15) {
+        matches.push({ comment: c, score });
+      }
+    }
+
+    // Sort by score desc then timestamp desc
+    matches.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return (b.comment.timestamp || b.comment.createdAt || 0) - (a.comment.timestamp || a.comment.createdAt || 0);
+    });
+
+    const results = matches.map(m => m.comment);
+
+    if (results.length === 0) {
+      // No stored comments — return one AI-generated seed (not persisted)
+      const seed = await generateSeedComment(qCanon || roleQuery);
+      if (seed) return res.json({ comments: [seed], seed: true });
+      return res.json({ comments: [] });
+    }
+
+    return res.json({ comments: results });
   } catch (e) {
-    console.error("Comments get error:", e);
+    console.error("Comments GET error:", e);
     return res.status(500).json({ error: "Failed to read comments" });
   }
 });
 
-app.post("/api/comments", (req, res) => {
+// POST create comment (topic/role and text required)
+app.post("/api/comments", async (req, res) => {
   try {
     const { name, text, role } = req.body;
-    if (!text || !role) return res.status(400).json({ error: "text and role are required" });
-    ensureCommentsFile();
+    // your frontend may call the field 'topic' instead of 'role' — support both
+    const topic = role || req.body.topic || "";
+    if (!text || !topic) return res.status(400).json({ error: "text and role/topic are required" });
+
+    ensureCommentsFileSafe();
+    // canonicalize (AI preferred) for better future matching
+    const canon = await canonicalizeRole(topic);
+
     const raw = fs.readFileSync(COMMENTS_FILE, "utf8");
     const db = JSON.parse(raw);
+    db.comments = db.comments || [];
+
     const entry = {
       id: `c_${Date.now()}`,
       name: String(name || "Anonymous").trim(),
       text: String(text).trim(),
-      role: String(role).trim(),
+      role: String(topic).trim(),
+      canonicalRole: canon.canonical,
+      aliases: canon.aliases || [],
+      tokens: canon.tokens || [],
       timestamp: Date.now(),
       auto: false
     };
-    db.comments = db.comments || [];
-    db.comments.push(entry);
-    fs.writeFileSync(COMMENTS_FILE, JSON.stringify(db, null, 2), "utf8");
-    return res.json({ ok: true, comment: entry });
+
+    // push newest-first (unshift) to keep file in newest-first order
+    db.comments.unshift(entry);
+
+    atomicWriteFileSync(COMMENTS_FILE, JSON.stringify(db, null, 2));
+    console.log(`[Comments POST] saved id=${entry.id} role="${entry.role}" total=${db.comments.length} file=${COMMENTS_FILE}`);
+    return res.json({ ok: true, comment: entry, total: db.comments.length });
   } catch (e) {
-    console.error("Comments post error:", e);
+    console.error("Comments POST error:", e);
     return res.status(500).json({ error: "Failed to save comment" });
   }
 });
@@ -294,6 +487,23 @@ Return only valid JSON.
   }
 });
 
+// --- Debug helper (optional) ---
+app.get("/api/debug/comments-file", (_req, res) => {
+  try {
+    ensureCommentsFile();
+    const stats = fs.statSync(COMMENTS_FILE);
+    return res.json({
+      path: COMMENTS_FILE,
+      size: stats.size,
+      mtime: stats.mtime,
+      exists: fs.existsSync(COMMENTS_FILE)
+    });
+  } catch (e) {
+    return res.status(500).json({ error: "debug failed", detail: String(e) });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
+  console.log(`Comments file path: ${COMMENTS_FILE}`);
 });

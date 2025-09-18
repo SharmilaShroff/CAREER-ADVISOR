@@ -683,6 +683,23 @@ export default function App() {
   function renderPathway() {
     // pathway expected structure: timeline_years, steps: [{title, duration_months, description, skills, suggested_resources}], internship_ideas, budget_tips, higher_education_options
     const p = pathway || {};
+
+    // --- small inline URL builder for LinkedIn people search (uses selectedRole.title)
+    // Appends " India" unless the role already contains "India" or a common Indian city.
+    const roleTitle = selectedRole?.title || "";
+    const lowerRole = roleTitle.toLowerCase();
+    const indianCities = [
+      "bengaluru","bangalore","mumbai","delhi","kolkata","chennai","hyderabad",
+      "pune","noida","gurgaon","gurugram","jaipur","lucknow","ahmedabad",
+      "kanpur","nagpur","visakhapatnam","coimbatore","vadodara","ludhiana",
+      "bhopal","patna","surat"
+    ];
+    const hasIndia = lowerRole.includes("india");
+    const hasCity = indianCities.some(c => lowerRole.includes(c));
+    const finalRoleForSearch = (!roleTitle) ? "India" : ((!hasIndia && !hasCity) ? `${roleTitle} India` : roleTitle);
+    const linkedInPeopleSearchUrl = `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(finalRoleForSearch)}`;
+    // --- end inline builder
+
     return (
       <div style={{ display: "grid", placeItems: "center", paddingTop: 24 }}>
         <div style={{ width: 980, background: "#fff", padding: 20, borderRadius: 14, boxShadow: "0 8px 40px rgba(0,0,0,0.06)" }}>
@@ -733,6 +750,35 @@ export default function App() {
             <DarkBtn onClick={() => setStep("thanks")}>Done</DarkBtn>
             <DarkBtn onClick={() => openRoleComments(selectedRole.title)}>Comments</DarkBtn>
             <DarkBtn onClick={() => getStayAhead(selectedRole.title)}>Stay Ahead</DarkBtn>
+
+            {/* NEW BUTTON: Search a Mentor (opens LinkedIn People search in a new tab).
+                Matches DarkBtn sizing & placement. Uses selectedRole.title (no new state).
+                Includes title and aria-label for accessibility. */}
+            <a
+              href={linkedInPeopleSearchUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={`Search mentors on LinkedIn for ${selectedRole?.title || ""}`}
+              aria-label={`Search mentors on LinkedIn for ${selectedRole?.title || ""}`}
+              style={{ textDecoration: "none", display: "inline-block" }}
+            >
+              <div style={{
+                padding: "10px 18px",
+                borderRadius: 12,
+                background: "#111",
+                color: "#fff",
+                border: "none",
+                cursor: "pointer",
+                fontWeight: 600,
+                minWidth: 140,
+                textAlign: "center",
+                lineHeight: "20px",
+                userSelect: "none"
+              }}>
+                🔗 Search a Mentor
+              </div>
+            </a>
+            {/* end new button */}
           </div>
         </div>
       </div>
@@ -852,3 +898,4 @@ export default function App() {
     </div>
   );
 }
+

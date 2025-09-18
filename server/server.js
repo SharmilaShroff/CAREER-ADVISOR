@@ -78,6 +78,40 @@ async function callGeminiJSON(prompt, temperature = 0.3) {
   return safeJsonParse(raw);
 }
 
+// --- Helper: build LinkedIn People Search URL for a given role ---
+// Uses the existing role string (no new global state). Encodes spaces as %20 and
+// appends " India" unless the role already contains "India" or a common Indian city
+// (to match examples such as "AI Product Manager Bangalore").
+function buildLinkedInPeopleSearchUrl(roleStr) {
+  const role = String(roleStr || "").trim();
+  // If empty role, fallback to search for "India"
+  if (!role) {
+    return "https://www.linkedin.com/search/results/people/?keywords=India";
+  }
+
+  // common Indian cities (case-insensitive). If role already mentions a city,
+  // we avoid appending " India" to prevent redundancy.
+  const indianCities = [
+    "bengaluru","bangalore","mumbai","delhi","kolkata","chennai","hyderabad",
+    "pune","noida","gurgaon","gurugram","jaipur","lucknow","ahmedabad",
+    "kanpur","nagpur","visakhapatnam","coimbatore","vadodara","ludhiana",
+    "bhopal","patna","surat"
+  ];
+
+  const lower = role.toLowerCase();
+  const hasIndia = lower.includes("india");
+  const hasCity = indianCities.some(c => lower.includes(c));
+
+  let finalRole = role;
+  if (!hasIndia && !hasCity) {
+    finalRole = `${role} India`;
+  }
+
+  // encodeURIComponent encodes spaces as %20
+  const encoded = encodeURIComponent(finalRole);
+  return `https://www.linkedin.com/search/results/people/?keywords=${encoded}`;
+}
+
 // --- Basic health / root ---
 app.get("/", (_req, res) => res.json({ message: "Career Advisor backend running 🚀", model: MODEL }));
 app.get("/api/health", (_req, res) => res.json({ ok: true, model: MODEL }));
@@ -193,9 +227,9 @@ Return only valid JSON.
       degree: String(h?.degree ?? "").trim(),
       specialization: String(h?.specialization ?? "").trim(),
       avg_salary_INR: String(h?.avg_salary_INR ?? "—").trim(),
-      typical_exams: Array.isArray(h?.typical_exams) ? h.typical_exams.map(x => String(x)) : [],
-      universities_example: Array.isArray(h?.universities_example) ? h.universities_example.map(x => String(x)) : [],
-      benefits: Array.isArray(h?.benefits) ? h.benefits.map(x => String(x)) : [],
+      typical_exams: Array.isArray(h?.typical_exams) ? h?.typical_exams.map(x => String(x)) : [],
+      universities_example: Array.isArray(h?.universities_example) ? h?.universities_example.map(x => String(x)) : [],
+      benefits: Array.isArray(h?.benefits) ? h?.benefits.map(x => String(x)) : [],
       cost_note: String(h?.cost_note ?? "").trim()
     })) : [];
 
@@ -507,3 +541,7 @@ app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
   console.log(`Comments file path: ${COMMENTS_FILE}`);
 });
+
+// Export the LinkedIn URL helper so frontend devs can import it if desired.
+// This does not introduce new APIs or global state; it's just a utility export.
+module.exports = { buildLinkedInPeopleSearchUrl };
